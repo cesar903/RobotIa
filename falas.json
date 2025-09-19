@@ -1,0 +1,7 @@
+{
+  "olá tudo bem": ["Sim, e você?", "Oi! Tudo certo?"],
+  "oi tudo bem": ["Tudo ótimo, e você?", "Oi! Como vai?"],
+  "qual o seu nome": ["Meu nome é Max, seu assistente.", "Pode me chamar de Max!"],
+  "seu nome": ["Meu nome é Max.", "Sou Max, seu assistente."],
+  "como está o dia hoje": ["O dia está ótimo!", "Hoje está um dia lindo!"]
+}
