@@ -22,13 +22,17 @@ int ultimoAnguloOlho = -1;
 Servo palpebra;
 int pinPalpebra = 6;
 unsigned long ultimoPiscar = 0;
-bool piscando = false;
 
 // --- Boca ---
 Servo boca;
-int pinBoca = 4;        // boca conectada no pino D12
-int bocaAberta = 100;    // ajuste se necessário
-int bocaFechada = 60;    // ajuste se necessário
+int pinBoca = 4;
+int bocaAberta = 100;
+int bocaFechada = 60;
+
+// --- Botão ---
+const int botaoPin = 7;  
+int estadoBotao = HIGH;      // começa não pressionado (por causa do INPUT_PULLUP)
+int ultimoEstadoBotao = HIGH;
 
 void setup() {
   Serial.begin(9600);
@@ -38,10 +42,12 @@ void setup() {
   olhoDireito.attach(pinOlhoDir);
 
   palpebra.attach(pinPalpebra);
-  palpebra.write(90); // começa aberta
+  palpebra.write(90);
 
   boca.attach(pinBoca);
-  boca.write(bocaFechada); // começa fechada
+  boca.write(bocaFechada);
+
+  pinMode(botaoPin, INPUT_PULLUP); // botão entre pino e GND
 
   Serial.println("Sistema iniciado. Boca pronta!");
 }
@@ -49,24 +55,33 @@ void setup() {
 void loop() {
   chain.update();
 
+  // --- Leitura do Botão ---
+  estadoBotao = digitalRead(botaoPin);
+
+  if (estadoBotao != ultimoEstadoBotao) {
+    if (estadoBotao == LOW) {
+      Serial.println("BOTAO:1"); // botão pressionado → começa ouvir
+    } else {
+      Serial.println("BOTAO:0"); // botão solto → para ouvir
+    }
+    delay(50); // anti-repique
+    ultimoEstadoBotao = estadoBotao;
+  }
+
   // --- Leitura do Serial ---
   if (Serial.available() > 0) {
     String comando = Serial.readStringUntil('\n');
     comando.trim();
 
-    // Garra
     if (comando.startsWith("G:") && garra.isConnected()) {
       int angGarra = comando.substring(2).toInt();
       if (angGarra >= 0 && angGarra <= 180 && angGarra != ultimoAnguloGarra) {
         garra.setPosition(angGarra);
         ultimoAnguloGarra = angGarra;
-        if (angGarra < 90)
-          garra.setColor(0, 1, 0);
-        else
-          garra.setColor(1, 0, 0);
+        if (angGarra < 90) garra.setColor(0, 1, 0);
+        else garra.setColor(1, 0, 0);
       }
     }
-    // Cabeça
     else if (comando.startsWith("C:") && cabeca.isConnected()) {
       int angCabeca = comando.substring(2).toInt();
       if (angCabeca >= 0 && angCabeca <= 180 && angCabeca != ultimoAnguloCabeca) {
@@ -74,7 +89,6 @@ void loop() {
         ultimoAnguloCabeca = angCabeca;
       }
     }
-    // Olhos
     else if (comando.startsWith("O:")) {
       int angOlho = comando.substring(2).toInt();
       angOlho = constrain(angOlho, 0, 100);
@@ -84,10 +98,7 @@ void loop() {
         ultimoAnguloOlho = angOlho;
       }
     }
-    // Boca
-    // Boca
     else if (comando == "B:1") {
-      // faz a boca "mexer" umas 3 vezes
       for (int i = 0; i < 3; i++) {
         boca.write(bocaAberta);
         delay(800);
@@ -96,18 +107,16 @@ void loop() {
       }
     }
     else if (comando == "B:0") {
-      boca.write(bocaFechada);  // garante fechada no fim
+      boca.write(bocaFechada);
     }
   }
 
-  // --- Pálpebra piscando a cada 5 segundos ---
+  // --- Pálpebra piscando ---
   unsigned long agora = millis();
   if (agora - ultimoPiscar >= 5000) {
-    piscando = true;
-    palpebra.write(150); // fecha
-    delay(200);          // tempo do piscar
-    palpebra.write(0);   // abre
+    palpebra.write(150);
+    delay(200);
+    palpebra.write(0);
     ultimoPiscar = agora;
-    piscando = false;
   }
 }

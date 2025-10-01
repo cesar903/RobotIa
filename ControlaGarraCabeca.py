@@ -1,17 +1,64 @@
-# ControlaTudo.py
 import cv2
 import mediapipe as mp
 import serial
 import time
 import math
-
-# --- adiciona no início ---
 import socket
 import threading
 
 HOST = "127.0.0.1"
 PORT = 5000
+PORT_BOTAO = 5001  # nova porta só para o botão
+botao_clients = []
+botao_pressionado = False  # variável global do botão
 
+# -----------------------
+# Conecta ao Arduino
+# -----------------------
+try:
+    arduino = serial.Serial('COM10', 9600, timeout=1)
+    time.sleep(2)
+except serial.SerialException:
+    print("ERRO: Não foi possível conectar na porta COM8.")
+    arduino = None
+
+# -----------------------
+# Envia estado do botão para todos os clientes conectados
+# -----------------------
+def envia_estado_botao(estado):
+    global botao_clients
+    for client in botao_clients[:]:
+        try:
+            client.sendall(estado.encode())
+        except:
+            botao_clients.remove(client)
+
+# -----------------------
+# Leitura do botão via Arduino
+# -----------------------
+def ler_botao_serial():
+    global botao_pressionado
+    while arduino:
+        if arduino.in_waiting > 0:
+            linha = arduino.readline().decode(errors='ignore').strip()
+            if linha == "BOTAO:1":
+                if not botao_pressionado:
+                    print("[BOTÃO] Pressionado")
+                botao_pressionado = True
+                envia_estado_botao("BOTAO:1")
+            elif linha == "BOTAO:0":
+                if botao_pressionado:
+                    print("[BOTÃO] Solto")
+                botao_pressionado = False
+                envia_estado_botao("BOTAO:0")
+        time.sleep(0.02)
+
+if arduino:
+    threading.Thread(target=ler_botao_serial, daemon=True).start()
+
+# -----------------------
+# Servidor de sockets para receber comandos (da boca ou TTS)
+# -----------------------
 def servidor_boca():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind((HOST, PORT))
@@ -24,26 +71,30 @@ def servidor_boca():
                 if data:
                     print(f"[SERVIDOR BOCA] Recebi: {data}")
                     if arduino:
-                        arduino.write((data + "\n").encode())  # envia direto para o Arduino
+                        arduino.write((data + "\n").encode())
 
-# inicia o servidor em thread paralela
 threading.Thread(target=servidor_boca, daemon=True).start()
 
+# -----------------------
+# Servidor de sockets exclusivo do botão
+# -----------------------
+def servidor_botao():
+    global botao_clients
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind((HOST, PORT_BOTAO))  # corrigido de HOST_BOTAO para HOST
+        s.listen()
+        print(f"[SERVIDOR BOTÃO] Aguardando conexão em {HOST}:{PORT_BOTAO}")
+        while True:
+            conn, addr = s.accept()
+            print(f"[SERVIDOR BOTÃO] Conectado: {addr}")
+            botao_clients.append(conn)
 
-# ============================================================================== 
-# 1. CONFIGURAÇÃO DO ARDUINO E CÂMERA
-# ==============================================================================
+threading.Thread(target=servidor_botao, daemon=True).start()
 
-try:
-    arduino = serial.Serial('COM10', 9600, timeout=1)
-    time.sleep(2)  # espera a conexão serial se estabelecer
-except serial.SerialException:
-    print("ERRO: Não foi possível conectar na porta COM8. Verifique a porta e a conexão.")
-    arduino = None
-
+# -----------------------
+# Funções de visão (câmera + MediaPipe)
+# -----------------------
 cap = cv2.VideoCapture(0)
-
-# Configuração do MediaPipe
 mp_drawing = mp.solutions.drawing_utils
 mp_hands = mp.solutions.hands
 mp_face_mesh = mp.solutions.face_mesh
@@ -57,10 +108,9 @@ ultimo_angulo_cabeca = None
 distancia_minima = 0.015
 distancia_maxima = 0.12
 
-# ============================================================================== 
-# 2. LOOP PRINCIPAL
-# ==============================================================================
-
+# -----------------------
+# Loop principal
+# -----------------------
 with mp_hands.Hands(min_detection_confidence=0.7, min_tracking_confidence=0.7) as hands, \
      mp_face_mesh.FaceMesh(min_detection_confidence=0.7, min_tracking_confidence=0.7) as face_mesh:
 
@@ -101,11 +151,10 @@ with mp_hands.Hands(min_detection_confidence=0.7, min_tracking_confidence=0.7) a
             dist_esquerdo = ponto_central.x - ponto_esquerdo.x
             dist_direito = ponto_direito.x - ponto_central.x
             soma = dist_esquerdo + dist_direito
-            angulo_cabeca = 90 if soma == 0 else int((dist_direito / soma)*(120-70)+70)
-            angulo_cabeca = max(70, min(120, angulo_cabeca))
+            angulo_cabeca = 90 if soma == 0 else int((dist_direito / soma)*(100-70)+70)
+            angulo_cabeca = max(70, min(100, angulo_cabeca))
             cv2.putText(frame, f'Cabeca: {angulo_cabeca}', (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (255,0,0), 2)
 
-            # Olhos (posição horizontal)
             for face_landmarks in face_results.multi_face_landmarks:
                 pos_x = face_landmarks.landmark[1].x
                 angulo_olho = int(pos_x * 100)
@@ -125,12 +174,8 @@ with mp_hands.Hands(min_detection_confidence=0.7, min_tracking_confidence=0.7) a
 
         cv2.imshow('Controle Total', frame)
 
-        if cv2.waitKey(1) & 0xFF == 27:  # ESC para sair
+        if cv2.waitKey(1) & 0xFF == 27:
             break
-
-# ============================================================================== 
-# 3. FINALIZAÇÃO
-# ==============================================================================
 
 print("Finalizando...")
 cap.release()

@@ -4,45 +4,90 @@ import random
 import unicodedata
 import pyaudio
 from vosk import Model, KaldiRecognizer
-import keyboard
 import time
 import queue
 import threading
 import sys
 import traceback
-import serial
 import socket
+import difflib
 
+# -----------------------
+# Configurações de rede
+# -----------------------
 HOST = "127.0.0.1"
-PORT = 5000
+PORT_BOCA = 5000       # para enviar comando de boca ao ControlaTudo.py
+PORT_BOTAO = 5001      # para receber estado do botão do ControlaTudo.py
 
+# -----------------------
+# Variáveis globais
+# -----------------------
+tts_queue = queue.Queue()
+falando_event = threading.Event()
+botao_pressionado = False  # atualizado via socket do servidor do botão
+
+# -----------------------
+# Função para enviar comando de boca
+# -----------------------
 def envia_comando_boca(comando):
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.connect((HOST, PORT))
+            s.connect((HOST, PORT_BOCA))
             s.sendall(comando.encode())
     except ConnectionRefusedError:
         print("[ERRO] Servidor de boca não está rodando.")
 
+# -----------------------
+# Cliente para receber estado do botão
+# -----------------------
+def escuta_botao_cliente():
+    global botao_pressionado
+    while True:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.connect((HOST, PORT_BOTAO))
+                print(f"[BOTÃO CLIENTE] Conectado ao servidor do botão em {HOST}:{PORT_BOTAO}")
+                while True:
+                    data = s.recv(1024).decode().strip()
+                    if data == "BOTAO:1":
+                        botao_pressionado = True
+                    elif data == "BOTAO:0":
+                        botao_pressionado = False
+        except ConnectionRefusedError:
+            print("[BOTÃO CLIENTE] Servidor do botão não disponível. Tentando novamente em 1s...")
+            time.sleep(1)
+        except Exception as e:
+            print("[BOTÃO CLIENTE] Erro:", e)
+            time.sleep(1)
 
+threading.Thread(target=escuta_botao_cliente, daemon=True).start()
 
 # -----------------------
-# Fila para mensagens de voz
+# Carrega falas JSON
 # -----------------------
-tts_queue = queue.Queue()
-falando_event = threading.Event()  # Event para sinalizar quando estiver falando
+with open("falas.json", "r", encoding="utf-8") as f:
+    respostas = json.load(f)
 
-try:
-    arduino = serial.Serial('COM10', 9600, timeout=1)
-    time.sleep(2)  # espera a conexão serial se estabelecer
-except serial.SerialException:
-    print("ERRO: Não foi possível conectar na porta COM8. Verifique a porta e a conexão.")
-    arduino = None
+def normalizar(texto):
+    return "".join(
+        c for c in unicodedata.normalize("NFD", texto.lower().strip())
+        if unicodedata.category(c) != "Mn"
+    )
 
+respostas_normalizadas = {normalizar(k): v for k, v in respostas.items()}
 
-# -----------------------
-# Thread TTS
-# -----------------------
+def melhor_resposta(frase, respostas_normalizadas, limite=0.4):
+    melhor_chave = None
+    melhor_score = 0
+    for chave in respostas_normalizadas.keys():
+        score = difflib.SequenceMatcher(None, chave, frase).ratio()
+        if score > melhor_score:
+            melhor_score = score
+            melhor_chave = chave
+    if melhor_score >= limite:
+        return random.choice(respostas_normalizadas[melhor_chave])
+    return None
+
 # -----------------------
 # Thread TTS
 # -----------------------
@@ -61,14 +106,13 @@ def tts_worker():
 
         try:
             falando_event.set()
-            envia_comando_boca("B:1")   # abre boca
-            print("[SINAL ENVIADO] Boca ABERTA (B:1)")
+            envia_comando_boca("B:1")  # abre boca
+            print("[SINAL] Boca ABERTA (B:1)")
 
             engine = pyttsx3.init()
             engine.setProperty('rate', 170)
             engine.setProperty('volume', 1.0)
 
-            # Seleção de voz automática
             voices = engine.getProperty("voices")
             selecionada = None
             for v in voices:
@@ -89,7 +133,6 @@ def tts_worker():
                 engine.stop()
             except Exception:
                 pass
-
             del engine
 
         except Exception as e:
@@ -97,36 +140,16 @@ def tts_worker():
             traceback.print_exc()
         finally:
             falando_event.clear()
-            envia_comando_boca("B:0")   # fecha boca
-            print("[SINAL ENVIADO] Boca FECHADA (B:0)")
+            envia_comando_boca("B:0")  # fecha boca
+            print("[SINAL] Boca FECHADA (B:0)")
             tts_queue.task_done()
 
-
-
-
-
-# inicia thread TTS como daemon
 threading.Thread(target=tts_worker, daemon=True).start()
 
 # -----------------------
-# Carrega falas JSON
-# -----------------------
-with open("falas.json", "r", encoding="utf-8") as f:
-    respostas = json.load(f)
-
-def normalizar(texto):
-    return "".join(
-        c for c in unicodedata.normalize("NFD", texto.lower().strip())
-        if unicodedata.category(c) != "Mn"
-    )
-
-respostas_normalizadas = {normalizar(k): v for k, v in respostas.items()}
-
-# -----------------------
-# Inicializa Vosk (modelo global)
+# Inicializa Vosk
 # -----------------------
 model = Model("vosk-model-small-pt-0.3")
-
 p = pyaudio.PyAudio()
 stream = p.open(format=pyaudio.paInt16,
                 channels=1,
@@ -135,49 +158,42 @@ stream = p.open(format=pyaudio.paInt16,
                 frames_per_buffer=2048)
 stream.start_stream()
 
-print("Assistente pronto. Pressione e segure ESPAÇO para falar.")
+print("Assistente pronto. Pressione e segure o BOTÃO.")
 
+# -----------------------
+# Loop principal
+# -----------------------
 try:
     while True:
-        # só inicia captura quando não estivermos falando
-        if not falando_event.is_set() and keyboard.is_pressed("space"):
+        if not falando_event.is_set() and botao_pressionado:
             print("[Ouvindo...]")
             audio_data = []
-            while keyboard.is_pressed("space"):
+            while botao_pressionado:
                 try:
                     data = stream.read(2048, exception_on_overflow=False)
                     audio_data.append(data)
                 except OSError:
-                    # overflow de buffer — ignora esse frame
                     pass
 
             print("[Processando...]")
             if audio_data:
-                # cria um recognizer local para cada captura (evita problemas com Reset())
                 rec = KaldiRecognizer(model, 16000)
                 for frame in audio_data:
                     rec.AcceptWaveform(frame)
-
                 resultado = rec.FinalResult()
                 try:
                     texto_reconhecido = json.loads(resultado).get("text", "")
-                except Exception:
+                except:
                     texto_reconhecido = ""
 
                 if texto_reconhecido:
                     print(f"[Você disse]: {texto_reconhecido}")
                     frase_normalizada = normalizar(texto_reconhecido)
-
-                    resposta = None
-                    for chave, opcoes in respostas_normalizadas.items():
-                        if chave in frase_normalizada:
-                            resposta = random.choice(opcoes)
-                            break
+                    resposta = melhor_resposta(frase_normalizada, respostas_normalizadas)
                     if not resposta:
-                        resposta = "Desculpe, não entendi o que você disse."
-
+                        resposta = "Não entendi"
                     print(f"[Fila de fala]: {resposta}")
-                    tts_queue.put(resposta)  # adiciona na fila do TTS
+                    tts_queue.put(resposta)
 
         time.sleep(0.05)
 
@@ -185,11 +201,8 @@ except KeyboardInterrupt:
     print("\nFinalizando Assistente de Voz...")
 
 finally:
-    # encerra fluxos
     stream.stop_stream()
     stream.close()
     p.terminate()
-    # sinaliza para TTS encerrar
     tts_queue.put(None)
-    # opcional: aguarda a fila esvaziar (não obrigatório)
     tts_queue.join()
